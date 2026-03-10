@@ -71,8 +71,11 @@ class ValidationRunner:
             except KeyboardInterrupt:
                 sys.exit(1)
             except RecoverableException as e:
-                logger.error(f"Recoverable exception: {e}")
-                sys.exit(1)
+                logger.error(f"Recoverable exception (attempt {attempt + 1}): {e}")
+                if attempt == 2:
+                    logger.error(f"Marking assignment {assignment_id} as failed after 3 attempts")
+                    self.api.mark_assignment_as_failed(assignment_id)
+                    return None
             except (RuntimeError, ValueError) as e:
                 logger.error(e)
                 self.api.mark_assignment_as_failed(assignment_id)
