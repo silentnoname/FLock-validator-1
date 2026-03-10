@@ -72,6 +72,8 @@ class ValidationRunner:
                 sys.exit(1)
             except RecoverableException as e:
                 logger.error(f"Recoverable exception (attempt {attempt + 1}): {e}")
+                module_obj.hf_model = None
+                module_obj.hf_tokenizer = None
                 if attempt == 2:
                     logger.error(f"Marking assignment {assignment_id} as failed after 3 attempts")
                     self.api.mark_assignment_as_failed(assignment_id)
