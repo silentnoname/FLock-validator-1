@@ -2,6 +2,7 @@ import os
 import re
 import random
 import json
+import time
 import httpx
 import torch
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -913,15 +914,26 @@ class LLMJudgeValidationModule(BaseValidationModule):
     def validate(self, data: LLMJudgeInputData, **kwargs) -> LLMJudgeMetrics:
         eval_file = download_file(data.validation_set_url)
 
-        try:
-            self._load_model(data.hg_repo_id, data.revision, data.max_params)
-        except InvalidModelParametersException as e:
-            # lowest possible reward for invalid model parameters
-            logger.error(f"Invalid model parameters: {e}")
-            return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
-        except Exception as e:
-            logger.error(f"Exception when load model: {e}")
-            return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
+        retry_delays = [30, 60, 300]  # 30s, 1min, 5min
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                self._load_model(data.hg_repo_id, data.revision, data.max_params)
+                break
+            except InvalidModelParametersException as e:
+                logger.error(f"Invalid model parameters: {e}")
+                return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
+            except Exception as e:
+                last_exception = e
+                if attempt < len(retry_delays):
+                    delay = retry_delays[attempt]
+                    logger.warning(
+                        f"Failed to load model (attempt {attempt + 1}/{len(retry_delays) + 1}): {e}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Exception when load model after {len(retry_delays) + 1} attempts: {e}")
+                    return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
 
         # Stage 1: Generate all responses
         logger.info("Stage 1: Generating all conversations for evaluation...")
