@@ -164,11 +164,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     f"Using it for tokenizer."
                 )
             else:
-                logger.error(
-                    f"LoRA's base model '{base_model}' is not in SUPPORTED_BASE_MODELS. "
-                    f"Marking assignment as failed."
+                raise InvalidModelParametersException(
+                    f"LoRA's base model '{base_model}' is not in SUPPORTED_BASE_MODELS."
                 )
-                raise
 
             self.hf_tokenizer = AutoTokenizer.from_pretrained(
                 base_model, trust_remote_code=True, use_fast=True, padding_side="left"
