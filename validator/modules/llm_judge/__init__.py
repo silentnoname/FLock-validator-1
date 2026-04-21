@@ -519,7 +519,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
         )
         def _make_api_call():
             completion = self.client.chat.completions.create(**params)
-            return completion.choices[0].message.content
+            msg = completion.choices[0].message
+            # Thinking 系模型(如 kimi-k2.5-thinking、deepseek-r1)会把正文放在
+            # reasoning_content,content 为 None。回退到 reasoning_content,
+            # 最后兜底空串,统一让下游只处理 str。
+            return msg.content or getattr(msg, "reasoning_content", None) or ""
 
         try:
             content = _make_api_call()
@@ -825,6 +829,15 @@ class LLMJudgeValidationModule(BaseValidationModule):
     ) -> Dict[str, Any]:
         result = {"score": 5.0, "confidence": 0, "reasoning": None}
 
+        if not isinstance(response, str) or not response.strip():
+            # 返回 None 表示"这次 try 无效",让上层完全跳过,不进 scores/confidences,
+            # 避免人造数污染均值。
+            logger.error(
+                f"Model '{model_name}' returned empty/None content "
+                f"(type={type(response).__name__}); skipping this try."
+            )
+            return None
+
         try:
             json_match = re.search(r'\{[^}]*"score"[^}]*\}', response, re.DOTALL)
             if json_match:
@@ -890,10 +903,25 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 model_eval_args = eval_args.copy()
                 model_eval_args["selected_model"] = model_name
 
-                response, selected_model = self._call_gpt(messages, model_eval_args)
-                parsed_result = self._parse_llm_response(
-                    response, model_name=selected_model
-                )
+                # 单次 try 失败不连累后续 try / 模型:整次跳过,不向
+                # conv_scores/conv_confidences 追加任何值,保持 score↔confidence
+                # 一一对应。
+                try:
+                    response, selected_model = self._call_gpt(messages, model_eval_args)
+                    parsed_result = self._parse_llm_response(
+                        response, model_name=selected_model
+                    )
+                except Exception:
+                    logger.exception(
+                        f"Evaluation try failed: conv_idx={conv_idx} "
+                        f"model={model_name} try={try_num + 1}/{max_eval_try}"
+                    )
+                    continue
+
+                # _parse_llm_response 在响应空/非 str 时返回 None,代表这次 try 无效,
+                # 完全跳过,不贡献任何分数/置信度。
+                if parsed_result is None:
+                    continue
 
                 conv_scores.append(parsed_result["score"])
                 if parsed_result["confidence"] is not None:
@@ -997,8 +1025,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     logger.info(
                         f"Evaluation progress: {completed_count}/{total_tasks} conversations evaluated ({evaluations_done}/{total_eval_calls} LLM calls, {progress_pct:.1f}%)"
                     )
-                except Exception as e:
-                    logger.error(f"Evaluation task failed: {e}")
+                except Exception:
+                    failed_conv_idx = future_to_task[future][3]
+                    logger.exception(
+                        f"Evaluation task failed: conv_idx={failed_conv_idx}"
+                    )
                     completed_count += 1
                     # Add default result for failed tasks
                     evaluation_results.append(
