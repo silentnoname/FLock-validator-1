@@ -383,11 +383,45 @@ class LLMJudgeValidationModule(BaseValidationModule):
         selected_model = random.choice(self.available_models)
         return selected_model
 
+    def _match_available_model(self, base_name: str) -> str | None:
+        """
+        Match a base model name against the provider list, accepting either
+        bare names ("kimi-k2.6") or provider-prefixed names ("moonshotai/kimi-k2.6").
+        Returns the available model ID as the provider lists it, or None.
+        """
+        if base_name in self.available_models:
+            return base_name
+
+        # Requested has prefix, available is bare: strip prefix and retry.
+        if "/" in base_name:
+            tail = base_name.split("/", 1)[1]
+            if tail in self.available_models:
+                return tail
+
+        # Requested is bare, available is prefixed: find a unique suffix match.
+        prefixed_matches = [
+            m for m in self.available_models
+            if "/" in m and m.split("/", 1)[1] == base_name
+        ]
+        if len(prefixed_matches) == 1:
+            return prefixed_matches[0]
+        if len(prefixed_matches) > 1:
+            logger.warning(
+                f"Ambiguous eval model '{base_name}' matches multiple providers: "
+                f"{prefixed_matches}. Skipping; specify the full 'provider/name'."
+            )
+            return None
+
+        return None
+
     def _resolve_eval_models(self, eval_args: dict) -> List[str]:
         """
         Resolve requested eval models against provider model list.
-        Supports alias forms like "<model>-low/high" by matching their parsed base model.
-        Returns requested model names (so extra params can still be derived later).
+        Supports two cross-platform conventions:
+          - Bare vs prefixed names ("kimi-k2.6" <-> "moonshotai/kimi-k2.6").
+          - Alias suffixes "-low" / "-high" / "-thinking" that encode call params.
+        Returns model names as the provider lists them, with any alias suffix
+        re-attached so _call_gpt can still extract reasoning_effort / thinking.
         """
         requested_models = eval_args.get("eval_model_list", []) if eval_args else []
         if not requested_models:
@@ -396,18 +430,39 @@ class LLMJudgeValidationModule(BaseValidationModule):
         resolved_models = []
         missing_models = []
         for requested_model in requested_models:
-            if requested_model in self.available_models:
-                resolved_models.append(requested_model)
+            # Try the full name first — covers exact matches and names where
+            # "thinking" is part of the model itself (e.g. "kimi-k2-thinking").
+            direct = self._match_available_model(requested_model)
+            if direct is not None:
+                if direct != requested_model:
+                    logger.info(
+                        f"Resolved eval model '{requested_model}' to available model '{direct}'."
+                    )
+                resolved_models.append(direct)
                 continue
 
+            # Otherwise peel off alias suffixes and try the base name.
             parsed_model_name, _ = self._parse_model_name_to_params(requested_model)
-            if parsed_model_name in self.available_models:
-                logger.info(
-                    f"Resolved eval model '{requested_model}' to available model '{parsed_model_name}'."
-                )
-                resolved_models.append(requested_model)
-            else:
+            if parsed_model_name == requested_model:
                 missing_models.append(requested_model)
+                continue
+
+            base_match = self._match_available_model(parsed_model_name)
+            if base_match is None:
+                missing_models.append(requested_model)
+                continue
+
+            # Re-attach the alias suffix to the resolved provider name so the
+            # downstream parse still recovers reasoning_effort / thinking.
+            alias_tokens = [
+                p for p in requested_model.split("-")
+                if p in {"low", "high", "thinking"}
+            ]
+            resolved_name = base_match + (("-" + "-".join(alias_tokens)) if alias_tokens else "")
+            logger.info(
+                f"Resolved eval model '{requested_model}' to available model '{resolved_name}'."
+            )
+            resolved_models.append(resolved_name)
 
         # De-duplicate while preserving order
         resolved_models = list(dict.fromkeys(resolved_models))
@@ -451,11 +506,28 @@ class LLMJudgeValidationModule(BaseValidationModule):
     def _parse_model_name_to_params(self, model_name: str) -> tuple[str, dict[str, Any]]:
         params: dict[str, Any] = {}
         extra: dict[str, Any] = {}
-        model_parts: list[str] = []
+
+        # If the name (with or without provider prefix) is itself a real
+        # available model, don't peel anything — covers cases like
+        # "kimi-k2-thinking" where "thinking" is part of the model ID.
+        if model_name in self.available_models or (
+            "/" in model_name and model_name.split("/", 1)[1] in self.available_models
+        ):
+            if any(
+                model_name == m or model_name.endswith("/" + m)
+                for m in ("kimi-k2.5", "kimi-k2.6")
+            ):
+                extra.setdefault("extra_body", {"thinking": {"type": "disabled"}})
+            params["extra_body"] = extra
+            return model_name, params
+
+        # Keep the "provider/" prefix (if any) intact while parsing alias suffixes.
+        prefix, _, body = model_name.rpartition("/")
+        prefix = prefix + "/" if prefix else ""
 
         REASONING_EFFORTS = {"low", "high"}
-
-        for part in model_name.split('-'):
+        model_parts: list[str] = []
+        for part in body.split('-'):
             if part in REASONING_EFFORTS:
                 params["reasoning_effort"] = part
             elif part == "thinking":
@@ -463,8 +535,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
             else:
                 model_parts.append(part)
 
-        cleaned_model_name = '-'.join(model_parts) if model_parts else model_name
-        if cleaned_model_name == "kimi-k2.5":
+        cleaned_body = '-'.join(model_parts) if model_parts else body
+        cleaned_model_name = prefix + cleaned_body
+        if cleaned_body in ("kimi-k2.5", "kimi-k2.6") or any(
+            cleaned_model_name.endswith("/" + m) for m in ("kimi-k2.5", "kimi-k2.6")
+        ):
             extra.setdefault("extra_body", {"thinking": {"type": "disabled"}})
         params["extra_body"] = extra
         return cleaned_model_name, params
@@ -492,9 +567,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
         selected_model, model_params = self._parse_model_name_to_params(eval_model)
 
         # Patch: kimi-k2.5-thinking requires temperature=1 and instant requires temperature=0.6
-        if eval_model == "kimi-k2.5":
+        eval_model_tail = eval_model.split("/", 1)[-1]
+        if eval_model_tail in ("kimi-k2.5", "kimi-k2.6"):
             temperature = 0.6
-        elif eval_model == "kimi-k2.5-thinking":
+        elif eval_model_tail in ("kimi-k2.5-thinking", "kimi-k2.6-thinking"):
             temperature = 1
 
         params = {
