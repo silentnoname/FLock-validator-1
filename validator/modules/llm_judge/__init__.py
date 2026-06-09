@@ -99,6 +99,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 api_key=os.getenv("OPENAI_API_KEY"),
                 base_url=os.getenv("OPENAI_BASE_URL"),
                 timeout=timeout,
+                max_retries=0,
             )
 
         except Exception as e:
