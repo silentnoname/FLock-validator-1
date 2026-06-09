@@ -13,6 +13,7 @@ from openai import OpenAI
 from loguru import logger
 from huggingface_hub import HfApi
 from typing import List, Dict, Any
+from urllib.parse import urlparse
 from validator.modules.llm_judge.prompt import get_prompt,template_str
 from validator.modules.llm_judge.utils import download_file
 from validator.modules.llm_judge.constant import SUPPORTED_BASE_MODELS
@@ -34,6 +35,15 @@ if env_path.exists():
 
 api = HfApi()
 LOWEST_POSSIBLE_SCORE = -999
+FLOCK_API_HOST = "api.flock.io"
+FLOCK_API_EVAL_MODEL_ALIASES = {
+    "gemini-3.5-flash": "gemini-3.5-flash-flocklife",
+    "deepseek-v4-pro": "deepseek-v4-pro-dslife",
+    "deepseek-v4-flash": "deepseek-v4-flash-dsikh",
+    "kimi-k2.6": "kimi-k2.6-llm",
+    "gemini-3.1-pro": "gemini-3.1-pro-deai",
+}
+FLOCK_API_EVAL_MODELS = list(FLOCK_API_EVAL_MODEL_ALIASES.values())
 
 
 class LLMJudgeConfig(BaseConfig):
@@ -383,6 +393,54 @@ class LLMJudgeValidationModule(BaseValidationModule):
         selected_model = random.choice(self.available_models)
         return selected_model
 
+    def _is_flock_api_platform(self) -> bool:
+        base_url = os.getenv("OPENAI_BASE_URL", "")
+        try:
+            return urlparse(base_url).netloc == FLOCK_API_HOST
+        except Exception:
+            return False
+
+    def _requested_eval_models(self, eval_args: dict) -> List[str]:
+        configured_models = eval_args.get("eval_model_list", []) if eval_args else []
+        if not self._is_flock_api_platform():
+            return configured_models
+
+        if not configured_models:
+            return FLOCK_API_EVAL_MODELS
+
+        mapped_models = [
+            self._map_flock_eval_model(model_name)
+            for model_name in configured_models
+        ]
+        if mapped_models != configured_models:
+            logger.info(
+                "OPENAI_BASE_URL points to FLock API; mapped eval_model_list "
+                f"{configured_models} to {mapped_models}."
+            )
+        return mapped_models
+
+    def _map_flock_eval_model(self, model_name: str) -> str:
+        if model_name in FLOCK_API_EVAL_MODEL_ALIASES.values():
+            return model_name
+
+        _, _, body = model_name.rpartition("/")
+        parts = body.split("-")
+        alias_tokens = []
+        while parts and parts[-1] in {"low", "high", "thinking"}:
+            alias_tokens.insert(0, parts.pop())
+
+        base_body = "-".join(parts)
+        mapped_body = FLOCK_API_EVAL_MODEL_ALIASES.get(base_body)
+        if mapped_body is None:
+            mapped_body = FLOCK_API_EVAL_MODEL_ALIASES.get(body)
+
+        if mapped_body is None:
+            return model_name
+
+        if alias_tokens:
+            return mapped_body + "-" + "-".join(alias_tokens)
+        return mapped_body
+
     def _match_available_model(self, base_name: str) -> str | None:
         """
         Match a base model name against the provider list, accepting either
@@ -423,7 +481,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         Returns model names as the provider lists them, with any alias suffix
         re-attached so _call_gpt can still extract reasoning_effort / thinking.
         """
-        requested_models = eval_args.get("eval_model_list", []) if eval_args else []
+        requested_models = self._requested_eval_models(eval_args)
         if not requested_models:
             return self.available_models
 
@@ -473,6 +531,13 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
 
         if not resolved_models:
+            if self._is_flock_api_platform():
+                logger.warning(
+                    "No FLock eval models matched provider model list, using configured "
+                    f"FLock eval models directly: {requested_models}"
+                )
+                return requested_models
+
             logger.warning(
                 "No requested eval models matched provider list, falling back to all available models."
             )
