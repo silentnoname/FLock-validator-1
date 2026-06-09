@@ -204,7 +204,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
         total = sum(p.numel() for p in self.hf_model.parameters())
         logger.info(f"Loaded HuggingFace model with {total:,} parameters")
-        self._log_model_device_placement()
         if total > max_params:
             logger.info(
                 f"Total model params: {total} exceeds the limit {max_params}, submitting validation result with a large loss"
@@ -212,37 +211,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
             raise InvalidModelParametersException(
                 f"Model parameters {total} exceed limit {max_params}"
             )
-
-    def _log_model_device_placement(self):
-        if self.hf_model is None:
-            return
-
-        if torch.cuda.is_available():
-            current_device = torch.cuda.current_device()
-            logger.info(
-                f"CUDA available: device_count={torch.cuda.device_count()}, "
-                f"current_device=cuda:{current_device} "
-                f"({torch.cuda.get_device_name(current_device)})"
-            )
-        else:
-            logger.info("CUDA not available; generation will run on CPU")
-
-        device_counts: dict[str, int] = {}
-        dtype_counts: dict[str, int] = {}
-        for param in self.hf_model.parameters():
-            device_counts[str(param.device)] = device_counts.get(str(param.device), 0) + 1
-            dtype_counts[str(param.dtype)] = dtype_counts.get(str(param.dtype), 0) + 1
-
-        logger.info(f"Model parameter devices: {device_counts}")
-        logger.info(f"Model parameter dtypes: {dtype_counts}")
-
-        hf_device_map = getattr(self.hf_model, "hf_device_map", None)
-        if hf_device_map:
-            map_device_counts: dict[str, int] = {}
-            for device in hf_device_map.values():
-                map_device_counts[str(device)] = map_device_counts.get(str(device), 0) + 1
-            logger.info(f"Model hf_device_map device summary: {map_device_counts}")
-            logger.info(f"Model hf_device_map detail: {hf_device_map}")
 
     def _generation_input_device(self) -> torch.device:
         if self.hf_model is None:
@@ -270,37 +238,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
     def _move_inputs_to_generation_device(self, model_inputs: dict) -> dict:
         target_device = self._generation_input_device()
-        first_param_device = (
-            next(self.hf_model.parameters()).device
-            if self.hf_model is not None
-            else torch.device("cpu")
-        )
-        before_devices = {
-            key: str(value.device)
-            for key, value in model_inputs.items()
-            if hasattr(value, "device")
-        }
-        model_inputs = {
+        return {
             key: value.to(target_device) if hasattr(value, "to") else value
             for key, value in model_inputs.items()
         }
-        after_devices = {
-            key: str(value.device)
-            for key, value in model_inputs.items()
-            if hasattr(value, "device")
-        }
-        logger.info(
-            f"Generation input device target={target_device}; "
-            f"first_param_device={first_param_device}; "
-            f"before={before_devices}; after={after_devices}"
-        )
-        if target_device.type == "cuda":
-            logger.info(
-                f"CUDA memory before generation on {target_device}: "
-                f"allocated={torch.cuda.memory_allocated(target_device):,} bytes, "
-                f"reserved={torch.cuda.memory_reserved(target_device):,} bytes"
-            )
-        return model_inputs
 
     def _generate_response(
         self,
@@ -499,11 +440,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
             self._map_flock_eval_model(model_name)
             for model_name in configured_models
         ]
-        if mapped_models != configured_models:
-            logger.info(
-                "OPENAI_BASE_URL points to FLock API; mapped eval_model_list "
-                f"{configured_models} to {mapped_models}."
-            )
         return mapped_models
 
     def _map_flock_eval_model(self, model_name: str) -> str:
@@ -715,7 +651,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
         else:
             eval_model = self._select_eval_model(eval_args)
         temperature = eval_args.get("temperature", 0.1)  # Default eval temperature
-        original_temperature = temperature
 
         selected_model, model_params = self._parse_model_name_to_params(eval_model)
 
@@ -731,11 +666,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
             "kimi-k2.6-llm-thinking",
         ) or selected_model_tail == "kimi-k2.6-llm":
             temperature = 1
-        if temperature != original_temperature:
-            logger.info(
-                f"Adjusted eval temperature for model {eval_model} "
-                f"(selected={selected_model}) from {original_temperature} to {temperature}"
-            )
 
         params = {
             "model": selected_model,
