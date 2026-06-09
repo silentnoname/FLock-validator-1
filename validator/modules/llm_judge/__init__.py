@@ -197,11 +197,13 @@ class LLMJudgeValidationModule(BaseValidationModule):
             self.hf_model = AutoModelForCausalLM.from_pretrained(
                 repo_id,
                 torch_dtype=compute_dtype,
-                device_map=None,
+                device_map="auto",
                 trust_remote_code=True,
                 low_cpu_mem_usage=True,
             )
         total = sum(p.numel() for p in self.hf_model.parameters())
+        logger.info(f"Loaded HuggingFace model with {total:,} parameters")
+        self._log_model_device_placement()
         if total > max_params:
             logger.info(
                 f"Total model params: {total} exceeds the limit {max_params}, submitting validation result with a large loss"
@@ -209,6 +211,95 @@ class LLMJudgeValidationModule(BaseValidationModule):
             raise InvalidModelParametersException(
                 f"Model parameters {total} exceed limit {max_params}"
             )
+
+    def _log_model_device_placement(self):
+        if self.hf_model is None:
+            return
+
+        if torch.cuda.is_available():
+            current_device = torch.cuda.current_device()
+            logger.info(
+                f"CUDA available: device_count={torch.cuda.device_count()}, "
+                f"current_device=cuda:{current_device} "
+                f"({torch.cuda.get_device_name(current_device)})"
+            )
+        else:
+            logger.info("CUDA not available; generation will run on CPU")
+
+        device_counts: dict[str, int] = {}
+        dtype_counts: dict[str, int] = {}
+        for param in self.hf_model.parameters():
+            device_counts[str(param.device)] = device_counts.get(str(param.device), 0) + 1
+            dtype_counts[str(param.dtype)] = dtype_counts.get(str(param.dtype), 0) + 1
+
+        logger.info(f"Model parameter devices: {device_counts}")
+        logger.info(f"Model parameter dtypes: {dtype_counts}")
+
+        hf_device_map = getattr(self.hf_model, "hf_device_map", None)
+        if hf_device_map:
+            map_device_counts: dict[str, int] = {}
+            for device in hf_device_map.values():
+                map_device_counts[str(device)] = map_device_counts.get(str(device), 0) + 1
+            logger.info(f"Model hf_device_map device summary: {map_device_counts}")
+            logger.info(f"Model hf_device_map detail: {hf_device_map}")
+
+    def _generation_input_device(self) -> torch.device:
+        if self.hf_model is None:
+            return torch.device("cpu")
+
+        first_param_device = next(self.hf_model.parameters()).device
+        hf_device_map = getattr(self.hf_model, "hf_device_map", None)
+        if hf_device_map:
+            for device in hf_device_map.values():
+                device_str = str(device)
+                if device_str == "disk":
+                    continue
+                if isinstance(device, int):
+                    candidate = torch.device(f"cuda:{device}")
+                elif device_str.isdigit():
+                    candidate = torch.device(f"cuda:{device_str}")
+                else:
+                    candidate = torch.device(device_str)
+
+                if candidate.type == "cuda" and not torch.cuda.is_available():
+                    continue
+                return candidate
+
+        return first_param_device
+
+    def _move_inputs_to_generation_device(self, model_inputs: dict) -> dict:
+        target_device = self._generation_input_device()
+        first_param_device = (
+            next(self.hf_model.parameters()).device
+            if self.hf_model is not None
+            else torch.device("cpu")
+        )
+        before_devices = {
+            key: str(value.device)
+            for key, value in model_inputs.items()
+            if hasattr(value, "device")
+        }
+        model_inputs = {
+            key: value.to(target_device) if hasattr(value, "to") else value
+            for key, value in model_inputs.items()
+        }
+        after_devices = {
+            key: str(value.device)
+            for key, value in model_inputs.items()
+            if hasattr(value, "device")
+        }
+        logger.info(
+            f"Generation input device target={target_device}; "
+            f"first_param_device={first_param_device}; "
+            f"before={before_devices}; after={after_devices}"
+        )
+        if target_device.type == "cuda":
+            logger.info(
+                f"CUDA memory before generation on {target_device}: "
+                f"allocated={torch.cuda.memory_allocated(target_device):,} bytes, "
+                f"reserved={torch.cuda.memory_reserved(target_device):,} bytes"
+            )
+        return model_inputs
 
     def _generate_response(
         self,
@@ -297,12 +388,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         f"Tokenization produced empty sequences for batch {batch_idx}"
                     )
 
-                # Move to device if available
-                if (
-                    torch.cuda.is_available()
-                    and next(self.hf_model.parameters()).is_cuda
-                ):
-                    model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
+                model_inputs = self._move_inputs_to_generation_device(model_inputs)
 
                 logger.info(
                     f"Generating batch {batch_idx}/{total_batches} ({min(i + batch_size, len(user_input))}/{len(user_input)} conversations)..."
