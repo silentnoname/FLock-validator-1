@@ -90,7 +90,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         try:
             timeout = httpx.Timeout(
                 connect=10.0,  # 10s to establish connection
-                read=120.0,  # 120s max to receive response
+                read=180.0,  # 180s max to receive response
                 write=20.0,  # 20s to send request
                 pool=10.0,  # 10s to acquire connection from pool
             )
