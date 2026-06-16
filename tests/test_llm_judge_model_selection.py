@@ -55,8 +55,8 @@ def test_flock_api_uses_flock_models_when_config_is_absent():
     "eval_model,expected_temperature",
     [
         ("kimi-k2.6", 0.6),
-        ("kimi-k2.6-llm", 0.6),
-        ("moonshotai/kimi-k2.6-llm", 0.6),
+        ("kimi-k2.6-llm", 1),
+        ("moonshotai/kimi-k2.6-llm", 1),
         ("kimi-k2.6-thinking", 1),
         ("kimi-k2.6-llm-thinking", 1),
         ("moonshotai/kimi-k2.6-llm-thinking", 1),

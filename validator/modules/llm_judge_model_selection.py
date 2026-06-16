@@ -13,10 +13,11 @@ FLOCK_API_EVAL_MODEL_ALIASES = {
     "gemini-3.1-pro": "gemini-3.1-pro-deai",
 }
 FLOCK_API_EVAL_MODELS = list(FLOCK_API_EVAL_MODEL_ALIASES.values())
-KIMI_INSTANT_EVAL_MODELS = {"kimi-k2.5", "kimi-k2.6", "kimi-k2.6-llm"}
-KIMI_THINKING_EVAL_MODELS = {
+KIMI_INSTANT_EVAL_MODELS = {"kimi-k2.5", "kimi-k2.6"}
+KIMI_TEMPERATURE_ONE_EVAL_MODELS = {
     "kimi-k2.5-thinking",
     "kimi-k2.6-thinking",
+    "kimi-k2.6-llm",
     "kimi-k2.6-llm-thinking",
 }
 
@@ -97,6 +98,6 @@ def resolve_eval_temperature(eval_model: str, default_temperature: float) -> flo
     eval_model_tail = eval_model.split("/", 1)[-1]
     if eval_model_tail in KIMI_INSTANT_EVAL_MODELS:
         return 0.6
-    if eval_model_tail in KIMI_THINKING_EVAL_MODELS:
+    if eval_model_tail in KIMI_TEMPERATURE_ONE_EVAL_MODELS:
         return 1
     return default_temperature
