@@ -13,7 +13,7 @@ def run_command(cmd, **kwargs):
         **kwargs
     )
     for line in process.stdout:
-        print(line, end='')  # Already includes newline
+        print(line, end='', flush=True)  # Flush immediately for pm2/non-tty
     process.wait()
     if process.returncode != 0:
         raise subprocess.CalledProcessError(process.returncode, cmd)
@@ -50,8 +50,10 @@ def install_in_env(env_name: str, packages: List[str]):
 def run_in_env(env_name: str, command: List[str], env_vars: Optional[dict] = None):
     """Run a command inside a conda environment."""
     logger.info(f"Running command {command} in environment {env_name}")
+    import os
+    merged_env = {**os.environ, **(env_vars or {}), "PYTHONUNBUFFERED": "1"}
     cmd = ["conda", "run", "-n", env_name] + command
-    run_command(cmd, env=env_vars)
+    run_command(cmd, env=merged_env)
 
 def ensure_env_and_run(
     env_name: str,

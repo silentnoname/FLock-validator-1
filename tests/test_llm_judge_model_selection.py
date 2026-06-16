@@ -22,6 +22,32 @@ def test_configured_models_work_when_discovery_fails():
     assert models == ["kimi-k2.6"]
 
 
+def test_flock_api_maps_configured_model_aliases():
+    models = resolve_eval_models(
+        {"eval_model_list": ["kimi-k2.6-thinking", "gemini-3.1-pro", "gemini-3.1-pro"]},
+        [],
+        openai_base_url="https://api.flock.io/v1",
+    )
+
+    assert models == ["kimi-k2.6-llm-thinking", "gemini-3.1-pro-deai"]
+
+
+def test_flock_api_uses_flock_models_when_config_is_absent():
+    models = resolve_eval_models(
+        {},
+        [],
+        openai_base_url="https://api.flock.io/v1",
+    )
+
+    assert models == [
+        "gemini-3.5-flash-flocklife",
+        "deepseek-v4-pro-dslife",
+        "deepseek-v4-flash-dsikh",
+        "kimi-k2.6-llm",
+        "gemini-3.1-pro-deai",
+    ]
+
+
 def test_discovered_models_are_used_when_config_is_absent():
     models = resolve_eval_models({}, ["model-a", "model-b", "model-a"])
 

@@ -384,7 +384,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
         Use configured evaluation models as the source of truth.
         Provider model discovery is only a fallback when no list is configured.
         """
-        return resolve_eval_models(eval_args, self.available_models)
+        return resolve_eval_models(
+            eval_args,
+            self.available_models,
+            openai_base_url=os.getenv("OPENAI_BASE_URL", ""),
+        )
 
     def _normalize_score(
         self, score: float, min_score: float = 0, max_score: float = 10.0
@@ -449,14 +453,27 @@ class LLMJudgeValidationModule(BaseValidationModule):
         else:
             eval_model = self._select_eval_model(eval_args)
         temperature = eval_args.get("temperature", 0.1)  # Default eval temperature
+        original_temperature = temperature
 
         selected_model, model_params = self._parse_model_name_to_params(eval_model)
 
         # Patch: kimi-k2.5-thinking requires temperature=1 and instant requires temperature=0.6
-        if eval_model == "kimi-k2.5" or eval_model == "kimi-k2.6":
+        eval_model_tail = eval_model.split("/", 1)[-1]
+        selected_model_tail = selected_model.split("/", 1)[-1]
+        if eval_model_tail in ("kimi-k2.5", "kimi-k2.6"):
             temperature = 0.6
-        elif eval_model == "kimi-k2.5-thinking" or eval_model == "kimi-k2.6-thinking":
+        elif eval_model_tail in (
+            "kimi-k2.5-thinking",
+            "kimi-k2.6-thinking",
+            "kimi-k2.6-llm",
+            "kimi-k2.6-llm-thinking",
+        ) or selected_model_tail == "kimi-k2.6-llm":
             temperature = 1
+        if temperature != original_temperature:
+            logger.info(
+                f"Adjusted eval temperature for model {eval_model} "
+                f"(selected={selected_model}) from {original_temperature} to {temperature}"
+            )
 
         params = {
             "model": selected_model,
