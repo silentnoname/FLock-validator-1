@@ -1,7 +1,10 @@
 import pytest
 
 from validator.exceptions import LLMJudgeException
-from validator.modules.llm_judge_model_selection import resolve_eval_models
+from validator.modules.llm_judge_model_selection import (
+    resolve_eval_models,
+    resolve_eval_temperature,
+)
 
 
 def test_configured_models_are_authoritative():
@@ -46,6 +49,25 @@ def test_flock_api_uses_flock_models_when_config_is_absent():
         "kimi-k2.6-llm",
         "gemini-3.1-pro-deai",
     ]
+
+
+@pytest.mark.parametrize(
+    "eval_model,expected_temperature",
+    [
+        ("kimi-k2.6", 0.6),
+        ("kimi-k2.6-llm", 0.6),
+        ("moonshotai/kimi-k2.6-llm", 0.6),
+        ("kimi-k2.6-thinking", 1),
+        ("kimi-k2.6-llm-thinking", 1),
+        ("moonshotai/kimi-k2.6-llm-thinking", 1),
+    ],
+)
+def test_kimi_eval_temperature_overrides(eval_model, expected_temperature):
+    assert resolve_eval_temperature(eval_model, 0.1) == expected_temperature
+
+
+def test_non_kimi_eval_temperature_uses_configured_default():
+    assert resolve_eval_temperature("gemini-3.1-pro-deai", 0.2) == 0.2
 
 
 def test_discovered_models_are_used_when_config_is_absent():
