@@ -38,7 +38,6 @@ def main() -> None:
     protocol_out = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)
     devnull = os.open(os.devnull, os.O_RDWR)
     os.dup2(devnull, sys.stdout.fileno())
-    os.dup2(devnull, sys.stderr.fileno())
     os.close(devnull)
 
     try:

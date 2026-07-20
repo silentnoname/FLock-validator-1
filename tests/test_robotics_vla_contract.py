@@ -684,6 +684,35 @@ def load_policy(model_dir, device, dtype):
     assert excinfo.value.failure_mode == "policy_timeout"
 
 
+def test_adapter_worker_reports_exit_status_and_stderr(tmp_path: Path):
+    (tmp_path / "flock_robotics_adapter.py").write_text(
+        """
+import os
+import sys
+
+class Policy:
+    def act(self, obs):
+        print("adapter failed inside native inference", file=sys.stderr, flush=True)
+        os._exit(23)
+
+def load_policy(model_dir, device, dtype):
+    return Policy()
+"""
+    )
+
+    policy = load_policy_from_adapter(
+        tmp_path, "flock_robotics_adapter.py", "cpu", "float32"
+    )
+    try:
+        with pytest.raises(RoboticsSubmissionError) as excinfo:
+            query_policy_action(policy, {}, 7)
+        message = str(excinfo.value)
+        assert "exit status 23" in message
+        assert "adapter failed inside native inference" in message
+    finally:
+        policy.close()
+
+
 def test_adapter_worker_counts_model_on_dependency_module_for_telemetry(
     tmp_path: Path,
 ):

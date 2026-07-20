@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ from validator.modules.robotics_vla.memory_monitor import MemoryMonitor
 _HEADER = struct.Struct("!Q")
 _MAX_REQUEST_BYTES = 32 * 1024**2
 _MAX_RESPONSE_BYTES = 1024**2
+_MAX_STDERR_CAPTURE_BYTES = 64 * 1024
+_MAX_STDERR_REPORT_BYTES = 4 * 1024
 _SANDBOX_ENV_ALLOWLIST = {
     "CUDA_VISIBLE_DEVICES",
     "DYLD_LIBRARY_PATH",
@@ -38,6 +41,55 @@ _SANDBOX_ENV_ALLOWLIST = {
 }
 
 
+class _BoundedStderrCapture:
+    """Continuously drain worker stderr while retaining only a bounded tail."""
+
+    def __init__(self, stream: Any, max_bytes: int = _MAX_STDERR_CAPTURE_BYTES) -> None:
+        self._stream = stream
+        self._max_bytes = max_bytes
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._drain,
+            name="robotics-vla-worker-stderr",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def wait(self, timeout: float = 0.2) -> None:
+        if self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def close(self) -> None:
+        self.wait()
+        try:
+            self._stream.close()
+        except OSError:
+            pass
+
+    def tail(self, max_bytes: int = _MAX_STDERR_REPORT_BYTES) -> str:
+        with self._lock:
+            data = bytes(self._buffer[-max_bytes:])
+        return data.decode("utf-8", errors="replace").strip()
+
+    def _drain(self) -> None:
+        try:
+            fd = self._stream.fileno()
+            while True:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    return
+                with self._lock:
+                    self._buffer.extend(chunk)
+                    overflow = len(self._buffer) - self._max_bytes
+                    if overflow > 0:
+                        del self._buffer[:overflow]
+        except (OSError, ValueError):
+            return
+
+
 class IsolatedPolicy:
     """Safe proxy for a miner policy running in a separate sandbox process."""
 
@@ -47,6 +99,7 @@ class IsolatedPolicy:
         temp_dir: tempfile.TemporaryDirectory[str],
         action_timeout_seconds: float,
         audited_parameter_count: int | None,
+        stderr_capture: _BoundedStderrCapture,
         memory_monitor: MemoryMonitor | None = None,
     ) -> None:
         self._process = process
@@ -55,6 +108,7 @@ class IsolatedPolicy:
         # Telemetry only (int, or None when the graph could not be fully walked).
         # Model size is enforced by the memory monitor below, not this count.
         self.audited_parameter_count = audited_parameter_count
+        self._stderr_capture = stderr_capture
         self._memory_monitor = memory_monitor
         self._closed = False
 
@@ -98,7 +152,7 @@ class IsolatedPolicy:
                 command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 cwd=temp_dir.name,
                 env=env,
                 close_fds=True,
@@ -107,6 +161,13 @@ class IsolatedPolicy:
         except Exception:
             temp_dir.cleanup()
             raise
+
+        if process.stderr is None:
+            _kill_process_group(process)
+            temp_dir.cleanup()
+            raise RuntimeError("Policy sandbox stderr pipe is unavailable")
+        stderr_capture = _BoundedStderrCapture(process.stderr)
+        stderr_capture.start()
 
         # Enforce the model-size ceiling on the live process: however the weights
         # are represented, they occupy memory. This is the authoritative bound;
@@ -118,6 +179,7 @@ class IsolatedPolicy:
             temp_dir,
             action_timeout_seconds,
             audited_parameter_count=None,
+            stderr_capture=stderr_capture,
             memory_monitor=monitor,
         )
         try:
@@ -166,6 +228,7 @@ class IsolatedPolicy:
                         stream.close()
                     except OSError:
                         pass
+            self._stderr_capture.close()
             try:
                 self._temp_dir.cleanup()
             except OSError:
@@ -192,7 +255,7 @@ class IsolatedPolicy:
             # retry loop would mask the real cause on subsequent sends.
             self._raise_if_memory_exceeded()
             raise RoboticsSubmissionError(
-                "Policy sandbox exited unexpectedly",
+                self._with_exit_diagnostics("Policy sandbox exited unexpectedly"),
                 failure_mode="policy_execution_failed",
             )
         payload = json.dumps(message, separators=(",", ":")).encode("utf-8")
@@ -206,9 +269,12 @@ class IsolatedPolicy:
             self._process.stdin.write(payload)
             self._process.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
+            self._wait_for_worker_exit()
             self._raise_if_memory_exceeded(exc)
             raise RoboticsSubmissionError(
-                "Policy sandbox exited while receiving an observation",
+                self._with_exit_diagnostics(
+                    "Policy sandbox exited while receiving an observation"
+                ),
                 failure_mode="policy_execution_failed",
             ) from exc
 
@@ -250,14 +316,53 @@ class IsolatedPolicy:
             json.JSONDecodeError,
             ValueError,
         ) as exc:
+            self._wait_for_worker_exit()
+            diagnostics = self._exit_diagnostics()
             _kill_process_group(self._process)
             # A memory-limit kill closes the pipe; surface it as such rather than a
             # generic protocol error so the miner sees why the submission failed.
             self._raise_if_memory_exceeded(exc)
+            message = f"Policy sandbox returned an invalid protocol response: {exc}"
+            if diagnostics:
+                message = f"{message} ({diagnostics})"
             raise RoboticsSubmissionError(
-                f"Policy sandbox returned an invalid protocol response: {exc}",
+                message,
                 failure_mode="policy_protocol_error",
             ) from exc
+
+    def _wait_for_worker_exit(self, timeout: float = 0.1) -> None:
+        if self._process.poll() is not None:
+            return
+        try:
+            self._process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def _with_exit_diagnostics(self, message: str) -> str:
+        diagnostics = self._exit_diagnostics()
+        return f"{message} ({diagnostics})" if diagnostics else message
+
+    def _exit_diagnostics(self) -> str:
+        returncode = self._process.poll()
+        if returncode is not None:
+            self._stderr_capture.wait()
+
+        details: list[str] = []
+        if returncode is not None:
+            if returncode < 0:
+                signal_number = -returncode
+                try:
+                    signal_name = signal.Signals(signal_number).name
+                except ValueError:
+                    signal_name = "unknown signal"
+                details.append(f"signal {signal_name} ({signal_number})")
+            else:
+                details.append(f"exit status {returncode}")
+
+        stderr_tail = self._stderr_capture.tail()
+        if stderr_tail:
+            details.append(f"worker stderr tail:\n{stderr_tail}")
+        return "; ".join(details)
 
     def _raise_if_memory_exceeded(self, cause: BaseException | None = None) -> None:
         monitor = self._memory_monitor
