@@ -1,0 +1,23 @@
+{
+  "seed": 42,
+  "suite_version": "panda_tabletop_v1",
+  "robot": "Panda",
+  "controller": "BASIC",
+  "horizon": 200,
+  "max_episode_horizon": 300,
+  "control_freq": 20,
+  "camera_name": "agentview",
+  "camera_height": 224,
+  "camera_width": 224,
+  "action_dim": 7,
+  "render_video": false,
+  "video_dir": "validation_outputs/robotics_vla",
+  "max_videos": 2,
+  "device": "cuda",
+  "torch_dtype": "bfloat16",
+  "package_cache_dir": ".cache/robotics_vla/package_cache",
+  "policy_load_timeout_seconds": 600,
+  "policy_action_timeout_seconds": 30,
+  "policy_memory_limit_gb": 64,
+  "policy_cpu_time_seconds": 3600
+}
