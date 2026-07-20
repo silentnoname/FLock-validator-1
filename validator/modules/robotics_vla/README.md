@@ -32,6 +32,8 @@ protocol (pickle is never accepted from the worker). The worker:
   credentials, proxy settings, or validator home directory;
 - has CPU, open-file, output-file, and per-call wall-time limits, plus the memory
   ceiling described below;
+- initializes the trusted PyTorch/CUDA runtime before enabling filesystem and
+  syscall isolation, then imports all miner adapter code inside the sandbox;
 - cannot create child processes, execute other programs, or use network syscalls
   under the production Linux seccomp policy; and
 - is killed as a process group on timeout, protocol failure, or a memory breach.

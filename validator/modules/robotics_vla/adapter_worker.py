@@ -93,9 +93,11 @@ def _prepare_worker_runtime(args: argparse.Namespace) -> None:
     _apply_resource_limits(
         args.memory_limit_bytes, args.cpu_time_seconds, args.device
     )
+    # CUDA cold-start needs OS services that the policy sandbox denies. Only the
+    # trusted runtime is initialized here; miner code is imported after isolation.
+    _apply_gpu_memory_limit(args.device, args.memory_limit_bytes)
     _install_linux_filesystem_sandbox(Path(args.model_dir))
     _install_linux_seccomp()
-    _apply_gpu_memory_limit(args.device, args.memory_limit_bytes)
 
 
 def _load_policy(args: argparse.Namespace) -> Any:
@@ -156,18 +158,23 @@ def _count_policy_parameters_safe(
 def _apply_gpu_memory_limit(device: str, memory_limit_bytes: int) -> None:
     """Cap this process's CUDA allocator so an oversize model fails at load.
 
-    Best-effort and a no-op off CUDA or without torch. The driver-enforced cap is
-    the primary VRAM bound; the host-side memory monitor bounds system RAM. Raw,
-    non-torch CUDA allocations are not covered by this cap (documented residual).
+    CPU execution remains a no-op. A requested CUDA runtime must initialize
+    successfully before sandbox activation so failures are reported at startup.
+    The driver-enforced cap is the primary VRAM bound; the host-side memory
+    monitor bounds system RAM. Raw, non-torch CUDA allocations are not covered by
+    this cap (documented residual).
     """
     if not device.lower().startswith("cuda"):
         return
     try:
         import torch
-    except ImportError:
-        return
+    except ImportError as exc:
+        raise RuntimeError("CUDA policy requires PyTorch") from exc
     if not torch.cuda.is_available():
-        return
+        raise RuntimeError(
+            f"CUDA device {device!r} is unavailable before sandbox activation"
+        )
+    torch.cuda.init()
     try:
         index = torch.device(device).index
     except Exception:  # noqa: BLE001 - fall back to the active device

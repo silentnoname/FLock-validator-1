@@ -715,7 +715,7 @@ def load_policy(model_dir, device, dtype):
         policy.close()
 
 
-def test_adapter_worker_checks_cuda_after_sandbox(tmp_path: Path, monkeypatch):
+def test_adapter_worker_initializes_cuda_before_sandbox(tmp_path: Path, monkeypatch):
     from validator.modules.robotics_vla import adapter_worker
 
     calls = []
@@ -723,6 +723,11 @@ def test_adapter_worker_checks_cuda_after_sandbox(tmp_path: Path, monkeypatch):
         adapter_worker,
         "_apply_resource_limits",
         lambda *_args: calls.append("resource_limits"),
+    )
+    monkeypatch.setattr(
+        adapter_worker,
+        "_apply_gpu_memory_limit",
+        lambda *_args: calls.append("cuda"),
     )
     monkeypatch.setattr(
         adapter_worker,
@@ -734,11 +739,6 @@ def test_adapter_worker_checks_cuda_after_sandbox(tmp_path: Path, monkeypatch):
         "_install_linux_seccomp",
         lambda: calls.append("seccomp"),
     )
-    monkeypatch.setattr(
-        adapter_worker,
-        "_apply_gpu_memory_limit",
-        lambda *_args: calls.append("cuda"),
-    )
     args = SimpleNamespace(
         memory_limit_bytes=1024,
         cpu_time_seconds=60,
@@ -748,10 +748,10 @@ def test_adapter_worker_checks_cuda_after_sandbox(tmp_path: Path, monkeypatch):
 
     adapter_worker._prepare_worker_runtime(args)
 
-    assert calls == ["resource_limits", "landlock", "seccomp", "cuda"]
+    assert calls == ["resource_limits", "cuda", "landlock", "seccomp"]
 
 
-def test_adapter_worker_skips_unavailable_cuda(monkeypatch):
+def test_adapter_worker_rejects_unavailable_cuda(monkeypatch):
     from validator.modules.robotics_vla import adapter_worker
 
     fake_torch = SimpleNamespace(
@@ -759,7 +759,41 @@ def test_adapter_worker_skips_unavailable_cuda(monkeypatch):
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
-    assert adapter_worker._apply_gpu_memory_limit("cuda", 1024) is None
+    with pytest.raises(RuntimeError, match="unavailable before sandbox activation"):
+        adapter_worker._apply_gpu_memory_limit("cuda", 1024)
+
+
+def test_adapter_worker_explicitly_initializes_cuda(monkeypatch):
+    from validator.modules.robotics_vla import adapter_worker
+
+    calls = []
+    fake_cuda = SimpleNamespace(
+        is_available=lambda: calls.append("available") or True,
+        init=lambda: calls.append("init"),
+        current_device=lambda: calls.append("current_device") or 0,
+        get_device_properties=lambda index: (
+            calls.append(("properties", index))
+            or SimpleNamespace(total_memory=4096)
+        ),
+        set_per_process_memory_fraction=lambda fraction, index: calls.append(
+            ("limit", fraction, index)
+        ),
+    )
+    fake_torch = SimpleNamespace(
+        cuda=fake_cuda,
+        device=lambda _device: SimpleNamespace(index=None),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    adapter_worker._apply_gpu_memory_limit("cuda", 1024)
+
+    assert calls == [
+        "available",
+        "init",
+        "current_device",
+        ("properties", 0),
+        ("limit", 0.25, 0),
+    ]
 
 
 def test_adapter_worker_reports_bounded_policy_traceback(tmp_path: Path):
