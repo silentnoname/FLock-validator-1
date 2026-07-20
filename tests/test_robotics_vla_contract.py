@@ -713,6 +713,42 @@ def load_policy(model_dir, device, dtype):
         policy.close()
 
 
+def test_adapter_worker_initializes_cuda_before_sandbox(tmp_path: Path, monkeypatch):
+    from validator.modules.robotics_vla import adapter_worker
+
+    calls = []
+    monkeypatch.setattr(
+        adapter_worker,
+        "_apply_resource_limits",
+        lambda *_args: calls.append("resource_limits"),
+    )
+    monkeypatch.setattr(
+        adapter_worker,
+        "_apply_gpu_memory_limit",
+        lambda *_args: calls.append("cuda"),
+    )
+    monkeypatch.setattr(
+        adapter_worker,
+        "_install_linux_filesystem_sandbox",
+        lambda *_args: calls.append("landlock"),
+    )
+    monkeypatch.setattr(
+        adapter_worker,
+        "_install_linux_seccomp",
+        lambda: calls.append("seccomp"),
+    )
+    args = SimpleNamespace(
+        memory_limit_bytes=1024,
+        cpu_time_seconds=60,
+        device="cuda",
+        model_dir=str(tmp_path),
+    )
+
+    adapter_worker._prepare_worker_runtime(args)
+
+    assert calls == ["resource_limits", "cuda", "landlock", "seccomp"]
+
+
 def test_adapter_worker_counts_model_on_dependency_module_for_telemetry(
     tmp_path: Path,
 ):

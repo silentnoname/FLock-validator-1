@@ -41,12 +41,7 @@ def main() -> None:
     os.close(devnull)
 
     try:
-        _apply_resource_limits(
-            args.memory_limit_bytes, args.cpu_time_seconds, args.device
-        )
-        _install_linux_filesystem_sandbox(Path(args.model_dir))
-        _install_linux_seccomp()
-        _apply_gpu_memory_limit(args.device, args.memory_limit_bytes)
+        _prepare_worker_runtime(args)
         policy = _load_policy(args)
         parameter_count = _count_policy_parameters_safe(policy, args)
         write_worker_message(
@@ -87,6 +82,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--memory-limit-bytes", type=int, required=True)
     parser.add_argument("--cpu-time-seconds", type=int, required=True)
     return parser.parse_args()
+
+
+def _prepare_worker_runtime(args: argparse.Namespace) -> None:
+    _apply_resource_limits(
+        args.memory_limit_bytes, args.cpu_time_seconds, args.device
+    )
+    # CUDA initialization requires OS services that the policy sandbox denies.
+    # Initialize the trusted runtime before restricting the untrusted adapter.
+    _apply_gpu_memory_limit(args.device, args.memory_limit_bytes)
+    _install_linux_filesystem_sandbox(Path(args.model_dir))
+    _install_linux_seccomp()
 
 
 def _load_policy(args: argparse.Namespace) -> Any:
@@ -155,10 +161,13 @@ def _apply_gpu_memory_limit(device: str, memory_limit_bytes: int) -> None:
         return
     try:
         import torch
-    except ImportError:
-        return
+    except ImportError as exc:
+        raise RuntimeError("CUDA policy requires PyTorch") from exc
     if not torch.cuda.is_available():
-        return
+        raise RuntimeError(
+            f"CUDA device {device!r} is unavailable before sandbox activation"
+        )
+    torch.cuda.init()
     try:
         index = torch.device(device).index
     except Exception:  # noqa: BLE001 - fall back to the active device
