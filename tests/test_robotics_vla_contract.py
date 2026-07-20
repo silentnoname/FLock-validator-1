@@ -749,6 +749,45 @@ def test_adapter_worker_initializes_cuda_before_sandbox(tmp_path: Path, monkeypa
     assert calls == ["resource_limits", "cuda", "landlock", "seccomp"]
 
 
+def test_adapter_worker_reports_bounded_policy_traceback(tmp_path: Path):
+    (tmp_path / "flock_robotics_adapter.py").write_text(
+        """
+class Policy:
+    def act(self, obs):
+        raise PermissionError(1, "blocked adapter operation")
+
+def load_policy(model_dir, device, dtype):
+    return Policy()
+"""
+    )
+
+    policy = load_policy_from_adapter(
+        tmp_path, "flock_robotics_adapter.py", "cpu", "float32"
+    )
+    try:
+        with pytest.raises(RoboticsSubmissionError) as excinfo:
+            query_policy_action(policy, {}, 7)
+        message = str(excinfo.value)
+        assert "blocked adapter operation" in message
+        assert "Worker traceback (tail)" in message
+        assert "flock_robotics_adapter.py" in message
+        assert "raise PermissionError" in message
+    finally:
+        policy.close()
+
+
+def test_adapter_worker_traceback_formatter_is_bounded():
+    from validator.modules.robotics_vla import adapter_worker
+
+    try:
+        raise RuntimeError("x" * (adapter_worker._MAX_ERROR_TRACEBACK_CHARS * 2))
+    except RuntimeError as exc:
+        formatted = adapter_worker._bounded_exception_traceback(exc)
+
+    assert len(formatted) <= adapter_worker._MAX_ERROR_TRACEBACK_CHARS
+    assert formatted.endswith("\n")
+
+
 def test_adapter_worker_counts_model_on_dependency_module_for_telemetry(
     tmp_path: Path,
 ):

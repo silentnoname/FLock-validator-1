@@ -7,10 +7,15 @@ import os
 import platform
 import resource
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+
+_MAX_ERROR_MESSAGE_CHARS = 2 * 1024
+_MAX_ERROR_TRACEBACK_CHARS = 8 * 1024
 
 
 # Running this file directly puts robotics_vla/ on sys.path, not the repository
@@ -186,10 +191,29 @@ def _write_error(stream: Any, exc: Exception, fallback_mode: str) -> None:
         stream,
         {
             "ok": False,
-            "error": str(exc),
+            "error": _bounded_exception_text(exc),
+            "traceback": _bounded_exception_traceback(exc),
             "failure_mode": getattr(exc, "failure_mode", fallback_mode),
         },
     )
+
+
+def _bounded_exception_text(exc: Exception) -> str:
+    try:
+        message = str(exc)
+    except Exception:  # noqa: BLE001 - even hostile exception formatting is bounded
+        message = f"<{type(exc).__name__} with unprintable message>"
+    return message[-_MAX_ERROR_MESSAGE_CHARS:]
+
+
+def _bounded_exception_traceback(exc: Exception) -> str:
+    try:
+        formatted = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must not break the protocol
+        return ""
+    return formatted[-_MAX_ERROR_TRACEBACK_CHARS:]
 
 
 def _apply_resource_limits(

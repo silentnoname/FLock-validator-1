@@ -28,6 +28,7 @@ _MAX_REQUEST_BYTES = 32 * 1024**2
 _MAX_RESPONSE_BYTES = 1024**2
 _MAX_STDERR_CAPTURE_BYTES = 64 * 1024
 _MAX_STDERR_REPORT_BYTES = 4 * 1024
+_MAX_WORKER_TRACEBACK_CHARS = 8 * 1024
 _SANDBOX_ENV_ALLOWLIST = {
     "CUDA_VISIBLE_DEVICES",
     "DYLD_LIBRARY_PATH",
@@ -381,9 +382,14 @@ class IsolatedPolicy:
         if response.get("ok") is True:
             return
         message = response.get("error")
+        message = str(message) if message else "Policy sandbox rejected the request"
+        worker_traceback = response.get("traceback")
+        if isinstance(worker_traceback, str) and worker_traceback.strip():
+            traceback_tail = worker_traceback[-_MAX_WORKER_TRACEBACK_CHARS:].strip()
+            message = f"{message}\nWorker traceback (tail):\n{traceback_tail}"
         failure_mode = response.get("failure_mode")
         raise RoboticsSubmissionError(
-            str(message) if message else "Policy sandbox rejected the request",
+            message,
             failure_mode=str(failure_mode) if failure_mode else fallback_mode,
         )
 
