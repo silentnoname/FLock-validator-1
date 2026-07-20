@@ -16,6 +16,17 @@ class RoboticsSubmissionError(Exception):
     submitted metrics' diagnostics so failures can be triaged.
     """
 
-    def __init__(self, message: str, failure_mode: str = "submission_error"):
+    def __init__(
+        self,
+        message: str,
+        failure_mode: str = "submission_error",
+        *,
+        submission_message: str | None = None,
+    ):
         super().__init__(message)
         self.failure_mode = failure_mode
+        # Full worker reports stay in local logs. The submitted metrics retain the
+        # original concise diagnostics contract expected by FedLedger.
+        self.submission_message = (
+            message if submission_message is None else submission_message
+        )

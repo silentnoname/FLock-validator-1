@@ -709,11 +709,13 @@ def load_policy(model_dir, device, dtype):
         message = str(excinfo.value)
         assert "exit status 23" in message
         assert "adapter failed inside native inference" in message
+        assert "exit status 23" not in excinfo.value.submission_message
+        assert "adapter failed inside native inference" not in excinfo.value.submission_message
     finally:
         policy.close()
 
 
-def test_adapter_worker_initializes_cuda_before_sandbox(tmp_path: Path, monkeypatch):
+def test_adapter_worker_checks_cuda_after_sandbox(tmp_path: Path, monkeypatch):
     from validator.modules.robotics_vla import adapter_worker
 
     calls = []
@@ -721,11 +723,6 @@ def test_adapter_worker_initializes_cuda_before_sandbox(tmp_path: Path, monkeypa
         adapter_worker,
         "_apply_resource_limits",
         lambda *_args: calls.append("resource_limits"),
-    )
-    monkeypatch.setattr(
-        adapter_worker,
-        "_apply_gpu_memory_limit",
-        lambda *_args: calls.append("cuda"),
     )
     monkeypatch.setattr(
         adapter_worker,
@@ -737,6 +734,11 @@ def test_adapter_worker_initializes_cuda_before_sandbox(tmp_path: Path, monkeypa
         "_install_linux_seccomp",
         lambda: calls.append("seccomp"),
     )
+    monkeypatch.setattr(
+        adapter_worker,
+        "_apply_gpu_memory_limit",
+        lambda *_args: calls.append("cuda"),
+    )
     args = SimpleNamespace(
         memory_limit_bytes=1024,
         cpu_time_seconds=60,
@@ -746,7 +748,18 @@ def test_adapter_worker_initializes_cuda_before_sandbox(tmp_path: Path, monkeypa
 
     adapter_worker._prepare_worker_runtime(args)
 
-    assert calls == ["resource_limits", "cuda", "landlock", "seccomp"]
+    assert calls == ["resource_limits", "landlock", "seccomp", "cuda"]
+
+
+def test_adapter_worker_skips_unavailable_cuda(monkeypatch):
+    from validator.modules.robotics_vla import adapter_worker
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: False),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert adapter_worker._apply_gpu_memory_limit("cuda", 1024) is None
 
 
 def test_adapter_worker_reports_bounded_policy_traceback(tmp_path: Path):
@@ -772,6 +785,9 @@ def load_policy(model_dir, device, dtype):
         assert "Worker traceback (tail)" in message
         assert "flock_robotics_adapter.py" in message
         assert "raise PermissionError" in message
+        assert "Worker traceback" not in excinfo.value.submission_message
+        assert "flock_robotics_adapter.py" not in excinfo.value.submission_message
+        assert "blocked adapter operation" in excinfo.value.submission_message
     finally:
         policy.close()
 
@@ -1111,6 +1127,27 @@ def test_invalid_metrics_carry_failure_mode():
     assert metrics.invalid_submission is True
     assert metrics.score == 0.0
     assert metrics.diagnostics["failure_mode"] == "adapter_missing"
+
+
+def test_validator_keeps_worker_report_out_of_submitted_diagnostics(monkeypatch):
+    from validator.modules import robotics_vla
+
+    def fail_before_validation(*_args, **_kwargs):
+        raise RoboticsSubmissionError(
+            "concise failure\nWorker traceback (tail):\n/private/worker.py",
+            failure_mode="model_load_failed",
+            submission_message="concise failure",
+        )
+
+    monkeypatch.setattr(robotics_vla, "resolve_model_dir", fail_before_validation)
+    module = RoboticsVLAValidationModule(RoboticsVLAConfig())
+    metrics = module.validate(RoboticsVLAInputData(hg_repo_id="org/model"))
+
+    assert metrics.invalid_submission is True
+    assert metrics.diagnostics == {
+        "reason": "concise failure",
+        "failure_mode": "model_load_failed",
+    }
 
 
 def test_runner_does_not_crash_on_bad_submission():

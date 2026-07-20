@@ -93,11 +93,9 @@ def _prepare_worker_runtime(args: argparse.Namespace) -> None:
     _apply_resource_limits(
         args.memory_limit_bytes, args.cpu_time_seconds, args.device
     )
-    # CUDA initialization requires OS services that the policy sandbox denies.
-    # Initialize the trusted runtime before restricting the untrusted adapter.
-    _apply_gpu_memory_limit(args.device, args.memory_limit_bytes)
     _install_linux_filesystem_sandbox(Path(args.model_dir))
     _install_linux_seccomp()
+    _apply_gpu_memory_limit(args.device, args.memory_limit_bytes)
 
 
 def _load_policy(args: argparse.Namespace) -> Any:
@@ -166,13 +164,10 @@ def _apply_gpu_memory_limit(device: str, memory_limit_bytes: int) -> None:
         return
     try:
         import torch
-    except ImportError as exc:
-        raise RuntimeError("CUDA policy requires PyTorch") from exc
+    except ImportError:
+        return
     if not torch.cuda.is_available():
-        raise RuntimeError(
-            f"CUDA device {device!r} is unavailable before sandbox activation"
-        )
-    torch.cuda.init()
+        return
     try:
         index = torch.device(device).index
     except Exception:  # noqa: BLE001 - fall back to the active device
@@ -192,6 +187,7 @@ def _write_error(stream: Any, exc: Exception, fallback_mode: str) -> None:
         {
             "ok": False,
             "error": _bounded_exception_text(exc),
+            "submission_error": _bounded_submission_text(exc),
             "traceback": _bounded_exception_traceback(exc),
             "failure_mode": getattr(exc, "failure_mode", fallback_mode),
         },
@@ -202,6 +198,18 @@ def _bounded_exception_text(exc: Exception) -> str:
     try:
         message = str(exc)
     except Exception:  # noqa: BLE001 - even hostile exception formatting is bounded
+        message = f"<{type(exc).__name__} with unprintable message>"
+    return message[-_MAX_ERROR_MESSAGE_CHARS:]
+
+
+def _bounded_submission_text(exc: Exception) -> str:
+    try:
+        message = getattr(exc, "submission_message", None)
+        if message is None:
+            message = str(exc)
+        if not isinstance(message, str):
+            message = str(message)
+    except Exception:  # noqa: BLE001 - diagnostics must remain serializable
         message = f"<{type(exc).__name__} with unprintable message>"
     return message[-_MAX_ERROR_MESSAGE_CHARS:]
 

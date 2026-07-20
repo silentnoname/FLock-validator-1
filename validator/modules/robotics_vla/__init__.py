@@ -189,7 +189,9 @@ class RoboticsVLAValidationModule(BaseValidationModule):
             # here, so the runner can retry them or re-queue the assignment.
             logger.error(f"Invalid robotics VLA submission [{exc.failure_mode}]: {exc}")
             return self._invalid_metrics(
-                str(exc), parameter_count=parameter_count, failure_mode=exc.failure_mode
+                exc.submission_message,
+                parameter_count=parameter_count,
+                failure_mode=exc.failure_mode,
             )
 
     def _invalid_metrics(

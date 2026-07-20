@@ -255,9 +255,11 @@ class IsolatedPolicy:
             # report that rather than a generic exit — otherwise the per-action
             # retry loop would mask the real cause on subsequent sends.
             self._raise_if_memory_exceeded()
+            message = "Policy sandbox exited unexpectedly"
             raise RoboticsSubmissionError(
-                self._with_exit_diagnostics("Policy sandbox exited unexpectedly"),
+                self._with_exit_diagnostics(message),
                 failure_mode="policy_execution_failed",
+                submission_message=message,
             )
         payload = json.dumps(message, separators=(",", ":")).encode("utf-8")
         if len(payload) > _MAX_REQUEST_BYTES:
@@ -272,11 +274,11 @@ class IsolatedPolicy:
         except (BrokenPipeError, OSError) as exc:
             self._wait_for_worker_exit()
             self._raise_if_memory_exceeded(exc)
+            message = "Policy sandbox exited while receiving an observation"
             raise RoboticsSubmissionError(
-                self._with_exit_diagnostics(
-                    "Policy sandbox exited while receiving an observation"
-                ),
+                self._with_exit_diagnostics(message),
                 failure_mode="policy_execution_failed",
+                submission_message=message,
             ) from exc
 
     def _receive(self, timeout_seconds: float, timeout_mode: str) -> dict[str, Any]:
@@ -323,12 +325,16 @@ class IsolatedPolicy:
             # A memory-limit kill closes the pipe; surface it as such rather than a
             # generic protocol error so the miner sees why the submission failed.
             self._raise_if_memory_exceeded(exc)
-            message = f"Policy sandbox returned an invalid protocol response: {exc}"
+            submission_message = (
+                f"Policy sandbox returned an invalid protocol response: {exc}"
+            )
+            message = submission_message
             if diagnostics:
                 message = f"{message} ({diagnostics})"
             raise RoboticsSubmissionError(
                 message,
                 failure_mode="policy_protocol_error",
+                submission_message=submission_message,
             ) from exc
 
     def _wait_for_worker_exit(self, timeout: float = 0.1) -> None:
@@ -382,7 +388,14 @@ class IsolatedPolicy:
         if response.get("ok") is True:
             return
         message = response.get("error")
-        message = str(message) if message else "Policy sandbox rejected the request"
+        fallback_message = (
+            str(message) if message else "Policy sandbox rejected the request"
+        )
+        submitted_message = response.get("submission_error")
+        submission_message = (
+            str(submitted_message) if submitted_message else fallback_message
+        )
+        message = fallback_message
         worker_traceback = response.get("traceback")
         if isinstance(worker_traceback, str) and worker_traceback.strip():
             traceback_tail = worker_traceback[-_MAX_WORKER_TRACEBACK_CHARS:].strip()
@@ -391,6 +404,7 @@ class IsolatedPolicy:
         raise RoboticsSubmissionError(
             message,
             failure_mode=str(failure_mode) if failure_mode else fallback_mode,
+            submission_message=submission_message,
         )
 
 

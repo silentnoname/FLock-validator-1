@@ -196,18 +196,23 @@ def retry_model_query(fn: Any, description: str, failure_mode: str) -> Any:
     """
     last_exc: Exception | None = None
     last_mode = failure_mode
+    last_submission_message: str | None = None
     for attempt in range(1 + MODEL_QUERY_RETRIES):
         try:
             return fn()
         except RoboticsSubmissionError as exc:
             last_exc, last_mode = exc, exc.failure_mode
+            last_submission_message = exc.submission_message
             logger.warning(f"{description} attempt {attempt + 1} rejected: {exc}")
         except Exception as exc:  # noqa: BLE001 - untrusted miner code
             last_exc, last_mode = exc, failure_mode
+            last_submission_message = str(exc)
             logger.warning(f"{description} attempt {attempt + 1} failed: {exc}")
+    prefix = f"{description} failed after {1 + MODEL_QUERY_RETRIES} attempts: "
     raise RoboticsSubmissionError(
-        f"{description} failed after {1 + MODEL_QUERY_RETRIES} attempts: {last_exc}",
+        f"{prefix}{last_exc}",
         failure_mode=last_mode,
+        submission_message=f"{prefix}{last_submission_message}",
     ) from last_exc
 
 
