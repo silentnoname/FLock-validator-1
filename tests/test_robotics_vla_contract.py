@@ -10,6 +10,7 @@ from huggingface_hub import errors as hf_errors
 
 from validator.modules.robotics_vla.adapter import (
     count_policy_parameters,
+    delete_cached_model_snapshot,
     load_policy_from_adapter,
     resolve_model_dir,
 )
@@ -1354,6 +1355,114 @@ def test_invalid_hub_reference_is_returned_as_zero_score_metrics(monkeypatch):
     assert metrics.score == 0.0
     assert metrics.loss == 1.0
     assert metrics.diagnostics["failure_mode"] == "model_reference_invalid"
+
+
+def test_delete_cached_model_snapshot_deletes_exact_revision(
+    monkeypatch, tmp_path: Path
+):
+    from validator.modules.robotics_vla import adapter
+
+    snapshot_path = tmp_path / "models--org--repo" / "snapshots" / "abc123"
+    snapshot_path.mkdir(parents=True)
+    matching_revision = SimpleNamespace(
+        commit_hash="abc123",
+        snapshot_path=snapshot_path,
+    )
+    other_revision = SimpleNamespace(
+        commit_hash="def456",
+        snapshot_path=tmp_path / "models--other--repo" / "snapshots" / "def456",
+    )
+
+    class DeleteStrategy:
+        executed = False
+
+        def execute(self):
+            self.executed = True
+
+    strategy = DeleteStrategy()
+    deleted_revisions = []
+
+    class CacheInfo:
+        repos = [
+            SimpleNamespace(revisions=[matching_revision]),
+            SimpleNamespace(revisions=[other_revision]),
+        ]
+
+        def delete_revisions(self, *commit_hashes):
+            deleted_revisions.extend(commit_hashes)
+            return strategy
+
+    monkeypatch.setattr(adapter, "scan_cache_dir", lambda: CacheInfo())
+
+    delete_cached_model_snapshot(snapshot_path)
+
+    assert deleted_revisions == ["abc123"]
+    assert strategy.executed is True
+
+
+def test_remote_model_cache_is_cleaned_after_validation_error(
+    monkeypatch, tmp_path: Path
+):
+    from validator.modules import robotics_vla
+
+    snapshot_path = tmp_path / "models--org--repo" / "snapshots" / "abc123"
+    snapshot_path.mkdir(parents=True)
+    deleted_paths = []
+
+    monkeypatch.setattr(
+        robotics_vla,
+        "resolve_model_dir",
+        lambda *_args, **_kwargs: snapshot_path,
+    )
+
+    def fail_parameter_count(_model_dir):
+        raise RoboticsSubmissionError(
+            "invalid weights",
+            failure_mode="model_load_failed",
+        )
+
+    monkeypatch.setattr(robotics_vla, "count_model_parameters", fail_parameter_count)
+    monkeypatch.setattr(
+        robotics_vla,
+        "delete_cached_model_snapshot",
+        deleted_paths.append,
+    )
+
+    module = RoboticsVLAValidationModule(config=RoboticsVLAConfig(device="cpu"))
+    metrics = module.validate(RoboticsVLAInputData(hg_repo_id="org/repo"))
+
+    assert metrics.invalid_submission is True
+    assert deleted_paths == [snapshot_path]
+
+
+def test_local_model_directory_is_not_deleted_after_validation_error(
+    monkeypatch, tmp_path: Path
+):
+    from validator.modules import robotics_vla
+
+    local_model_dir = tmp_path / "local-model"
+    local_model_dir.mkdir()
+    deleted_paths = []
+
+    def fail_parameter_count(_model_dir):
+        raise RoboticsSubmissionError(
+            "invalid weights",
+            failure_mode="model_load_failed",
+        )
+
+    monkeypatch.setattr(robotics_vla, "count_model_parameters", fail_parameter_count)
+    monkeypatch.setattr(
+        robotics_vla,
+        "delete_cached_model_snapshot",
+        deleted_paths.append,
+    )
+
+    module = RoboticsVLAValidationModule(config=RoboticsVLAConfig(device="cpu"))
+    metrics = module.validate(RoboticsVLAInputData(hg_repo_id=str(local_model_dir)))
+
+    assert metrics.invalid_submission is True
+    assert deleted_paths == []
+    assert local_model_dir.exists()
 
 
 def test_transient_hub_failure_remains_recoverable(monkeypatch):

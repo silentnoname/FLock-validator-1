@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 from huggingface_hub import errors as hf_errors
-from huggingface_hub import snapshot_download
+from huggingface_hub import scan_cache_dir, snapshot_download
 from loguru import logger
 
 from validator.modules.robotics_vla.errors import RoboticsSubmissionError
@@ -50,6 +50,32 @@ def resolve_model_dir(repo_id_or_path: str, revision: str = "main") -> Path:
             failure_mode="model_reference_invalid",
         ) from exc
     return Path(path).resolve()
+
+
+def delete_cached_model_snapshot(model_dir: Path) -> None:
+    """Delete the Hugging Face cache revision backing ``model_dir``.
+
+    The Hub cache manager removes the snapshot, its refs, and blobs that are not
+    shared with another cached revision. Matching the exact snapshot path first
+    prevents a local model directory from ever being treated as cache content.
+    """
+    snapshot_path = model_dir.resolve()
+    cache_info = scan_cache_dir()
+    commit_hashes = {
+        revision.commit_hash
+        for repo in cache_info.repos
+        for revision in repo.revisions
+        if revision.snapshot_path.resolve() == snapshot_path
+    }
+    if not commit_hashes:
+        logger.warning(
+            f"Could not find Hugging Face cache snapshot for {snapshot_path}; "
+            "leaving the directory unchanged"
+        )
+        return
+
+    cache_info.delete_revisions(*commit_hashes).execute()
+    logger.info(f"Deleted Hugging Face cache snapshot {snapshot_path}")
 
 
 def _is_deterministic_hub_error(exc: Exception) -> bool:

@@ -205,6 +205,10 @@ python run.py robotics_vla \
 
 This starts a polling daemon that fetches assignments from FedLedger, validates each submission, and submits results. It keeps running until interrupted.
 
+After each validation attempt, the validator removes the downloaded model revision
+from the Hugging Face cache. Model directories supplied as local paths are never
+deleted.
+
 ### Local validation (no FedLedger)
 
 Validate a specific HuggingFace model repo or local directory without a live assignment:

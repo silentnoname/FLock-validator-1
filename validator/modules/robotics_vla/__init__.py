@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from loguru import logger
 from pydantic import Field
 
@@ -12,6 +14,7 @@ from validator.modules.base import (
 from validator.modules.robotics_vla.adapter import (
     count_model_parameters,
     count_policy_parameters,
+    delete_cached_model_snapshot,
     load_policy_from_adapter,
     resolve_model_dir,
 )
@@ -96,6 +99,8 @@ class RoboticsVLAValidationModule(BaseValidationModule):
 
     def validate(self, data: RoboticsVLAInputData, **kwargs) -> RoboticsVLAMetrics:
         parameter_count: int | None = None
+        model_dir: Path | None = None
+        delete_model_cache = not Path(data.hg_repo_id).expanduser().exists()
         try:
             model_dir = resolve_model_dir(data.hg_repo_id, data.revision)
             # Parameter count is telemetry only. Model size is enforced at runtime
@@ -193,6 +198,15 @@ class RoboticsVLAValidationModule(BaseValidationModule):
                 parameter_count=parameter_count,
                 failure_mode=exc.failure_mode,
             )
+        finally:
+            if delete_model_cache and model_dir is not None:
+                try:
+                    delete_cached_model_snapshot(model_dir)
+                except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+                    logger.warning(
+                        f"Could not delete Hugging Face cache snapshot "
+                        f"{model_dir}: {exc}"
+                    )
 
     def _invalid_metrics(
         self,
